@@ -29,6 +29,12 @@ def navigate_to(page):
     st.session_state.current_page = page
     st.rerun()
 
+def to_excel(df, sheet_name='Sheet1'):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=True, sheet_name=sheet_name)
+    return output.getvalue()
+
 def load_file_content(file):
     results = []
     if file.name.endswith('.xlsx'):
@@ -49,7 +55,7 @@ def parse_single_dataframe(df_raw, source_name):
         # 最低限の行数チェック
         if len(lines_df) < 2: return [], "データ行不足"
         
-        # A2セル(インデックス1,0)付近にある氏名を取得トライ
+        # A2セル付近にある氏名を取得
         full_name = lines_df.iloc[1, 0].strip()
         if not full_name: return [], "氏名欄(A2)が空欄"
 
@@ -94,8 +100,7 @@ def parse_single_dataframe(df_raw, source_name):
         return records, None
     except Exception as e: return [], str(e)
 
-# ページ設定
-st.set_page_config(page_title="VISIT ANALYZER Lite", layout="wide", page_icon="⚡")
+# ページ設定 & 翻訳防止
 st.set_page_config(page_title="VISIT ANALYZER Lite", layout="wide", page_icon="⚡")
 st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
 
@@ -193,21 +198,40 @@ else:
                     m = st.radio("表示モード", ["日次", "週次"], horizontal=True)
                     if m == "日次":
                         p = df.pivot_table(index=['氏名', '職種', '訪問日'], columns='カテゴリ', aggfunc='size', fill_value=0)
-                        p['合計'] = p.sum(axis=1)
-                        st.dataframe(p.style.background_gradient(cmap='Greens', subset=['合計']), use_container_width=True)
+                        file_label = "daily_report"
                     else:
                         df['週'] = df['訪問日'] - pd.to_timedelta(df['訪問日'].dt.weekday, unit='D')
                         p = df.pivot_table(index=['氏名', '職種', '週'], columns='カテゴリ', aggfunc='size', fill_value=0)
-                        p['合計'] = p.sum(axis=1)
-                        st.dataframe(p.style.format({"週": "{:%Y-%m-%d}"}).background_gradient(cmap='Greens', subset=['合計']), use_container_width=True)
+                        # 週表示のフォーマットは見かけだけなので、Excel用にはそのまま出力
+                        file_label = "weekly_report"
+                    
+                    p['合計'] = p.sum(axis=1)
+                    st.dataframe(p.style.background_gradient(cmap='Greens', subset=['合計']), use_container_width=True)
+                    
+                    # Excelダウンロードボタン
+                    excel_data = to_excel(p)
+                    st.download_button(
+                        label="📥 Excelとしてダウンロード",
+                        data=excel_data,
+                        file_name=f"{file_label}.xlsx",
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    )
                 
                 with t2:
                     df['月'] = df['訪問日'].dt.strftime('%Y-%m')
                     p = df.pivot_table(index=['氏名', '職種', '月'], columns='カテゴリ', aggfunc='size', fill_value=0)
                     p['合計'] = p.sum(axis=1)
                     st.dataframe(p.style.background_gradient(cmap='Greens', subset=['合計']), use_container_width=True)
+                    
+                    # Excelダウンロードボタン
+                    excel_data = to_excel(p)
+                    st.download_button(
+                        label="📥 Excelとしてダウンロード",
+                        data=excel_data,
+                        file_name="monthly_report.xlsx",
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    )
             else:
                 st.warning("スタッフを選択してください。")
         else:
-
             st.error("データがありません。「データ読み込み」を行ってください。")
