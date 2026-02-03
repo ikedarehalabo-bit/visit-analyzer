@@ -112,7 +112,7 @@ def parse_files(uploaded_files):
             df_str = df_raw.fillna("").astype(str)
             if df_str.shape[0] < 6 or df_str.shape[1] < 10: continue
             
-            staff_info = df_str.iloc[1, 0].strip() # A2
+            staff_info = df_str.iloc[1, 0].strip() # A2: スタッフ名と職種
             if not staff_info: continue
             
             job_title = "不明"
@@ -123,7 +123,7 @@ def parse_files(uploaded_files):
             df_data = df_raw.iloc[START_ROW:].copy()
             
             for _, row in df_data.iterrows():
-                d_val = row.iloc[1] # B列
+                d_val = row.iloc[1] # B列: 日付
                 if pd.isna(d_val) or str(d_val).strip() == "": continue
                 try: 
                     v_date = pd.to_datetime(d_val, errors='coerce')
@@ -140,10 +140,10 @@ def parse_files(uploaded_files):
                 f_em = check_flag(svc, ["緊急", "緊"])
                 f_nb = "難病複数回" in svc
 
-                # --- カテゴリ決定ロジック (ここが重要) ---
+                # --- カテゴリ決定ロジック ---
                 if f_pvt:
                     ins_type = "自費"
-                    category_name = "自費"  # 時間に関係なく「自費」列にまとめる
+                    category_name = "自費" 
                 elif "医療" in ins_txt:
                     ins_type = "医療"
                     category_name = f"{mins}分(医療)"
@@ -161,7 +161,8 @@ def parse_files(uploaded_files):
                     'サービス内容': svc, '緊急フラグ': f_em, '難病フラグ': f_nb, '自費フラグ': f_pvt
                 })
     return pd.DataFrame(all_records)
-    # =============================================================================
+
+# =============================================================================
 # 4. マスタデータ管理
 # =============================================================================
 def load_masters():
@@ -314,7 +315,8 @@ def run_pl_engine(df, smst, conf):
     total_exp += params.get('sga_total', 0)
 
     return total_rev, total_exp, details, staff_rev_map
-    # =============================================================================
+
+# =============================================================================
 # 6. UI 実装 (日本語化・完全版)
 # =============================================================================
 st.set_page_config(page_title="VISIT ANALYZER V12", layout="wide", page_icon="⚡")
@@ -349,7 +351,7 @@ if page == "ホーム":
     st.info("左側のメニューから機能を選択してください。")
     st.markdown("""
     - **データ読込**: 実績簿(Excel)をドラッグ＆ドロップで取り込みます
-    - **集計レポート**: 週次・月次の訪問件数表を作成します（自費も集計可）
+    - **集計レポート**: 日次・週次・月次のクロス集計（回数・時間）を行います
     - **収支・給与分析**: インセンティブ計算、人件費率、営業利益を算出します
     - **BIダッシュボード**: 看護・リハ部門別の稼働率やAI訪問効率スコアを表示します
     - **マスタ設定**: 単価設定やスタッフ情報の管理を行います
@@ -379,35 +381,82 @@ elif page == "データ読込":
                 st.success(f"読込完了: {len(df)} 件のレコード")
 
 elif page == "集計レポート":
-    st.subheader("訪問集計レポート")
+    st.subheader("訪問集計レポート (クロス集計版)")
     df = st.session_state.master_df
+
     if not df.empty:
+        # フィルタリング
         stf = sorted(df['氏名'].unique())
         sel = st.multiselect("スタッフ選択", stf, default=stf)
+        
         if sel:
             v = df[df['氏名'].isin(sel)].copy()
-            t1, t2 = st.tabs(["週次レポート", "月次レポート"])
-            
-            with t1:
-                v['WeekLabel'] = v['訪問日'].apply(get_week_label)
-                p = v.pivot_table(index=['氏名','WeekLabel'], columns='カテゴリ', aggfunc='size', fill_value=0)
-                # 自費列が後ろに来るように列ソート（簡易的）
-                cols = sorted([c for c in p.columns if "自費" not in c]) + sorted([c for c in p.columns if "自費" in c])
-                p = p[cols]
-                p = p.loc[:, ~p.columns.str.contains("0分")]
-                p['合計'] = p.sum(axis=1)
-                st.dataframe(p.style.background_gradient(cmap='Blues'), use_container_width=True)
-                st.download_button("Excelダウンロード", to_excel(p, "Weekly"), "weekly.xlsx")
-            
-            with t2:
-                v['Month'] = v['訪問日'].dt.strftime('%Y-%m')
-                p = v.pivot_table(index=['氏名','Month'], columns='カテゴリ', aggfunc='size', fill_value=0)
-                cols = sorted([c for c in p.columns if "自費" not in c]) + sorted([c for c in p.columns if "自費" in c])
-                p = p[cols]
-                p = p.loc[:, ~p.columns.str.contains("0分")]
-                p['合計'] = p.sum(axis=1)
-                st.dataframe(p.style.background_gradient(cmap='Blues'), use_container_width=True)
-                st.download_button("Excelダウンロード", to_excel(p, "Monthly"), "monthly.xlsx")
+
+            # --- 集計用ヘルパー関数 ---
+            def create_pivot(source_df, period_col, period_name):
+                # ピボットテーブル作成 (回数と時間を同時に集計)
+                p = source_df.pivot_table(
+                    index=['氏名', '職種', period_col],
+                    columns='カテゴリ',
+                    values='時間(分)',
+                    aggfunc=['count', 'sum'],
+                    fill_value=0
+                )
+                
+                # カラムの整理: 英語のプレフィックスを日本語に置換してフラット化
+                new_cols = []
+                for t, c in p.columns:
+                    prefix = "回数" if t == 'count' else "時間"
+                    new_cols.append(f"{prefix}_{c}")
+                p.columns = new_cols
+                
+                # 列の並び替え
+                return p.sort_index(axis=1)
+
+            # --- タブによる表示切り替え ---
+            t_day, t_week, t_month = st.tabs(["📅 日次レポート", "📊 週次レポート", "📈 月次レポート"])
+
+            # 1. 日次集計
+            with t_day:
+                v['日次'] = v['訪問日'].dt.strftime('%m/%d(%a)')
+                df_day = create_pivot(v, '日次', 'Date')
+                st.markdown("##### 日別集計 (回数・時間)")
+                st.dataframe(df_day.style.background_gradient(cmap='Blues'), use_container_width=True)
+                st.download_button("Excelダウンロード", to_excel(df_day, "Daily"), "report_daily.xlsx")
+
+            # 2. 週次集計
+            with t_week:
+                v['週次'] = v['訪問日'].apply(get_week_label)
+                df_week = create_pivot(v, '週次', 'Week')
+                
+                # 合計列の計算
+                count_cols = [c for c in df_week.columns if c.startswith('回数')]
+                sum_cols = [c for c in df_week.columns if c.startswith('時間')]
+                
+                df_week['【合計】回数'] = df_week[count_cols].sum(axis=1)
+                df_week['【合計】時間'] = df_week[sum_cols].sum(axis=1)
+
+                st.markdown("##### 週別集計")
+                st.dataframe(df_week.style.background_gradient(cmap='Greens', subset=['【合計】時間']), use_container_width=True)
+                st.download_button("Excelダウンロード", to_excel(df_week, "Weekly"), "report_weekly.xlsx")
+
+            # 3. 月次集計
+            with t_month:
+                v['月次'] = v['訪問日'].dt.strftime('%Y-%m')
+                df_month = create_pivot(v, '月次', 'Month')
+                
+                count_cols = [c for c in df_month.columns if c.startswith('回数')]
+                sum_cols = [c for c in df_month.columns if c.startswith('時間')]
+                
+                df_month['【合計】回数'] = df_month[count_cols].sum(axis=1)
+                df_month['【合計】時間'] = df_month[sum_cols].sum(axis=1)
+                
+                st.markdown("##### 月間集計")
+                st.dataframe(df_month.style.background_gradient(cmap='Oranges', subset=['【合計】時間']), use_container_width=True)
+                st.download_button("Excelダウンロード", to_excel(df_month, "Monthly"), "report_monthly.xlsx")
+
+    else:
+        st.info("データを読み込んでください")
 
 elif page == "収支・給与分析":
     st.subheader("収支・給与シミュレーション")
@@ -479,7 +528,6 @@ elif page == "収支・給与分析":
 elif page == "BIダッシュボード":
     st.subheader("AI訪問効率分析")
     if not st.session_state.master_df.empty:
-        std = 160
         df = st.session_state.master_df.copy()
         df['Month'] = df['訪問日'].dt.strftime('%Y-%m')
         tgt = df['Month'].max()
