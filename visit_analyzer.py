@@ -11,7 +11,7 @@ from io import BytesIO
 from datetime import datetime, timedelta
 
 # =============================================================================
-# 1. CONSTANTS & PARAMETERS
+# 1. 定数・設定パラメータ
 # =============================================================================
 STAFF_MASTER_FILE = "staff_master.csv"
 OFFICE_MASTER_FILE = "office_master.json"
@@ -24,8 +24,7 @@ JOB_RANK = {
 
 STD_SALARY = {"NURSE": 360000, "REHAB": 270000}
 
-# Industry Standard for Max Potential Revenue per FTE (for AI Analysis)
-# 業界標準の最大生産性モデル (FTE1.0あたり月間85万円売上を100%とする)
+# AI分析用：FTE1.0あたりの理論最大売上 (月間85万円を基準)
 THEORETICAL_MAX_REV_PER_FTE = 850000 
 
 KAIGO_UNITS = {20: 313, 30: 470, 40: 470, 60: 821, 90: 1125, "other": 821}
@@ -45,7 +44,7 @@ ADDON_PRICES = {
 PRIVATE_PRICES = {"NURSE_60": 10000, "REHAB_40": 6500}
 
 # =============================================================================
-# 2. UTILITY FUNCTIONS
+# 2. ユーティリティ関数
 # =============================================================================
 def ceil_decimal(value, decimals=1):
     if pd.isna(value): return 0.0
@@ -94,7 +93,7 @@ def get_week_label(dt):
     return f"{dt.month}月第{week_num}週"
 
 # =============================================================================
-# 3. FILE PARSER
+# 3. ファイル解析ロジック (コア機能：自費統合)
 # =============================================================================
 @st.cache_data
 def parse_files(uploaded_files):
@@ -141,23 +140,32 @@ def parse_files(uploaded_files):
                 f_em = check_flag(svc, ["緊急", "緊"])
                 f_nb = "難病複数回" in svc
 
-                if f_pvt: ins_type = "自費"
-                elif "医療" in ins_txt: ins_type = "医療"
-                elif "介護" in ins_txt: ins_type = "介護"
-                else: ins_type = "その他"
+                # --- カテゴリ決定ロジック (ここが重要) ---
+                if f_pvt:
+                    ins_type = "自費"
+                    category_name = "自費"  # 時間に関係なく「自費」列にまとめる
+                elif "医療" in ins_txt:
+                    ins_type = "医療"
+                    category_name = f"{mins}分(医療)"
+                elif "介護" in ins_txt:
+                    ins_type = "介護"
+                    category_name = f"{mins}分(介護)"
+                else:
+                    ins_type = "その他"
+                    category_name = f"{mins}分(その他)"
 
                 all_records.append({
                     '氏名': staff_info, '職種': job_title, '訪問日': v_date,
                     '利用者名': user, '時間(分)': mins, '保険': ins_type,
-                    'カテゴリ': f"{mins}分({ins_type})",
+                    'カテゴリ': category_name,
                     'サービス内容': svc, '緊急フラグ': f_em, '難病フラグ': f_nb, '自費フラグ': f_pvt
                 })
     return pd.DataFrame(all_records)
     # =============================================================================
-# 4. MASTER DATA (Incentive Rules)
+# 4. マスタデータ管理
 # =============================================================================
 def load_masters():
-    # Staff Master
+    # スタッフマスタ
     cols = ['氏名','職種','役職','人員換算','基準給与','調整額']
     if os.path.exists(STAFF_MASTER_FILE):
         try:
@@ -169,7 +177,7 @@ def load_masters():
     else:
         df_s = pd.DataFrame(columns=cols)
 
-    # Office Master
+    # 事業所マスタ
     default_off = {
         "area_grade": "3級地 (11.12円)", "kaigo_em_cnt": 0,
         "fac_type": "機能強化型1", "is_24h": "あり",
@@ -178,7 +186,6 @@ def load_masters():
             "nurse_em_price": 5000
         },
         "manual_addons": [],
-        # 新: インセンティブ計算ルール
         "incentive_rules": [
             {"target": "リハビリ職", "threshold": 70.0, "price": 4350},
             {"target": "看護職", "threshold": 80.0, "price": 4000}
@@ -202,16 +209,13 @@ def save_masters(df_s, dict_o):
         json.dump(dict_o, f, ensure_ascii=False, indent=4)
 
 # =============================================================================
-# 5. CORE ENGINE (Revenue per Staff & Dynamic Incentive)
+# 5. P/L計算エンジン (収入・支出・インセンティブ)
 # =============================================================================
 def calculate_staff_revenue(df, conf):
-    """
-    スタッフごとの売上貢献額を概算（BI効率分析用）
-    """
+    """スタッフごとの売上貢献額算出"""
     area_p = AREA_GRADES.get(conf['area_grade'], 11.12)
     staff_rev = {}
     
-    # 難病カウント処理
     if not df.empty:
         nb_df = df[(df['保険']=='医療') & (df['難病フラグ'])].copy()
         nb_df = nb_df.sort_values(['訪問日','時間(分)'])
@@ -244,11 +248,10 @@ def run_pl_engine(df, smst, conf):
     manage_p = IRYO_MANAGE_FEES.get(conf['fac_type'], 7440)
     params = conf.get('pl_params', {})
     
-    # 1. Total Revenue Calculation
+    # 収入
     staff_rev_map = calculate_staff_revenue(df, conf)
     base_rev = sum(staff_rev_map.values())
     
-    # Add-ons
     r_em_iryo = df[(df['保険']=='医療') & (df['緊急フラグ'])].shape[0] * ADDON_PRICES['iryo_emerg_visit']
     users_man = df[(df['保険']=='医療') & (df['利用者名']!='不明')]['利用者名'].nunique()
     r_man = users_man * manage_p
@@ -261,7 +264,7 @@ def run_pl_engine(df, smst, conf):
     
     total_rev = int(base_rev + r_em_iryo + r_man + r_24 + r_term + r_k_em + r_add)
 
-    # 2. Expenditure with Dynamic Incentives
+    # 支出 (変動インセンティブ対応)
     df['cost_min'] = df['時間(分)']
     rehab_40 = (df['保険']=='医療') & (df['職種'].apply(is_rehab_staff)) & (df['時間(分)']==40)
     df.loc[rehab_40, 'cost_min'] = 60 # 特例
@@ -279,11 +282,9 @@ def run_pl_engine(df, smst, conf):
         job = r['職種']
         role = r['役職']
         
-        # Dynamic Incentive Calculation
         inc = 0
         work_hours = ceil_decimal(r['時間']/60, 1)
         
-        # 管理者・リーダーは除外（またはルールで調整）
         if role not in ["管理者", "リーダー"]:
             for rule in rules:
                 target_job = rule.get('target', '')
@@ -301,7 +302,7 @@ def run_pl_engine(df, smst, conf):
         em = int(r['緊急'] * np) if is_nurse_staff(job) else 0
         
         gross = fix + inc + em + adj
-        cost = int(gross * 1.15) # 法定福利費
+        cost = int(gross * 1.15) 
         total_exp += cost
         
         details.append({
@@ -314,9 +315,9 @@ def run_pl_engine(df, smst, conf):
 
     return total_rev, total_exp, details, staff_rev_map
     # =============================================================================
-# 6. UI IMPLEMENTATION (Strategic Dashboard)
+# 6. UI 実装 (日本語化・完全版)
 # =============================================================================
-st.set_page_config(page_title="VISIT ANALYZER V11", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="VISIT ANALYZER V12", layout="wide", page_icon="⚡")
 st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
 
 st.markdown("""
@@ -337,19 +338,28 @@ if 'staff_master' not in st.session_state:
     st.session_state.office_master = o
 
 with st.sidebar:
-    st.title("MENU")
-    page = st.radio("Function:", ["HOME", "UPLOAD", "REPORTS", "PL_ANALYSIS", "BI_DASHBOARD", "SETTINGS"])
+    st.title("メニュー")
+    page = st.radio("機能選択:", ["ホーム", "データ読込", "集計レポート", "収支・給与分析", "BIダッシュボード", "マスタ設定"])
 
-if page == "HOME":
-    st.title("VISIT ANALYZER V11")
-    st.markdown("### Strategic Management System")
-    st.info("サイドバーから機能を選択してください。")
+# --- ページルーティング ---
 
-elif page == "UPLOAD":
-    st.subheader("Data Upload")
-    up = st.file_uploader("Upload Excel", type=['xlsx'], accept_multiple_files=True)
+if page == "ホーム":
+    st.title("VISIT ANALYZER V12")
+    st.markdown("### 訪問看護 経営・集計統合システム")
+    st.info("左側のメニューから機能を選択してください。")
+    st.markdown("""
+    - **データ読込**: 実績簿(Excel)をドラッグ＆ドロップで取り込みます
+    - **集計レポート**: 週次・月次の訪問件数表を作成します（自費も集計可）
+    - **収支・給与分析**: インセンティブ計算、人件費率、営業利益を算出します
+    - **BIダッシュボード**: 看護・リハ部門別の稼働率やAI訪問効率スコアを表示します
+    - **マスタ設定**: 単価設定やスタッフ情報の管理を行います
+    """)
+
+elif page == "データ読込":
+    st.subheader("実績簿データ読込")
+    up = st.file_uploader("実績簿(Excel)をここにドロップ", type=['xlsx'], accept_multiple_files=True)
     if up:
-        with st.spinner("Processing..."):
+        with st.spinner("データ解析中..."):
             df = parse_files(up)
             if not df.empty:
                 st.session_state.master_df = df
@@ -366,34 +376,41 @@ elif page == "UPLOAD":
                 if new_r:
                     st.session_state.staff_master = pd.concat([curr, pd.DataFrame(new_r)], ignore_index=True)
                     save_masters(st.session_state.staff_master, st.session_state.office_master)
-                st.success(f"Loaded: {len(df)} records")
+                st.success(f"読込完了: {len(df)} 件のレコード")
 
-elif page == "REPORTS":
-    st.subheader("Reports")
+elif page == "集計レポート":
+    st.subheader("訪問集計レポート")
     df = st.session_state.master_df
     if not df.empty:
         stf = sorted(df['氏名'].unique())
-        sel = st.multiselect("Staff", stf, default=stf)
+        sel = st.multiselect("スタッフ選択", stf, default=stf)
         if sel:
             v = df[df['氏名'].isin(sel)].copy()
-            t1, t2 = st.tabs(["Weekly", "Monthly"])
+            t1, t2 = st.tabs(["週次レポート", "月次レポート"])
+            
             with t1:
                 v['WeekLabel'] = v['訪問日'].apply(get_week_label)
                 p = v.pivot_table(index=['氏名','WeekLabel'], columns='カテゴリ', aggfunc='size', fill_value=0)
+                # 自費列が後ろに来るように列ソート（簡易的）
+                cols = sorted([c for c in p.columns if "自費" not in c]) + sorted([c for c in p.columns if "自費" in c])
+                p = p[cols]
                 p = p.loc[:, ~p.columns.str.contains("0分")]
-                p['Total'] = p.sum(axis=1)
+                p['合計'] = p.sum(axis=1)
                 st.dataframe(p.style.background_gradient(cmap='Blues'), use_container_width=True)
-                st.download_button("Download Excel", to_excel(p, "Weekly"), "weekly.xlsx")
+                st.download_button("Excelダウンロード", to_excel(p, "Weekly"), "weekly.xlsx")
+            
             with t2:
                 v['Month'] = v['訪問日'].dt.strftime('%Y-%m')
                 p = v.pivot_table(index=['氏名','Month'], columns='カテゴリ', aggfunc='size', fill_value=0)
+                cols = sorted([c for c in p.columns if "自費" not in c]) + sorted([c for c in p.columns if "自費" in c])
+                p = p[cols]
                 p = p.loc[:, ~p.columns.str.contains("0分")]
-                p['Total'] = p.sum(axis=1)
+                p['合計'] = p.sum(axis=1)
                 st.dataframe(p.style.background_gradient(cmap='Blues'), use_container_width=True)
-                st.download_button("Download Excel", to_excel(p, "Monthly"), "monthly.xlsx")
+                st.download_button("Excelダウンロード", to_excel(p, "Monthly"), "monthly.xlsx")
 
-elif page == "PL_ANALYSIS":
-    st.subheader("P/L & KPI Analysis")
+elif page == "収支・給与分析":
+    st.subheader("収支・給与シミュレーション")
     df = st.session_state.master_df
     conf = st.session_state.office_master
     smst = st.session_state.staff_master
@@ -403,27 +420,37 @@ elif page == "PL_ANALYSIS":
         tgt = df['Month'].max()
         df_tgt = df[df['Month'] == tgt].copy()
         
-        st.markdown(f"**Target: {tgt}**")
+        st.markdown(f"**対象月: {tgt}**")
         
-        # P/L Calc
+        with st.expander("計算パラメータ設定", expanded=False):
+            params = conf.get('pl_params', {})
+            c1,c2,c3 = st.columns(3)
+            p_sga = c1.number_input("販売管理費 (SGA)", value=params.get('sga_total', 0))
+            p_ot = c2.number_input("全社残業代", value=params.get('ot_pay_total', 0))
+            
+            if st.button("パラメータ更新"):
+                params['sga_total'] = p_sga
+                params['ot_pay_total'] = p_ot
+                conf['pl_params'] = params
+                save_masters(smst, conf)
+                st.rerun()
+
         rev, exp, rows, _ = run_pl_engine(df_tgt, smst, conf)
         prof = rev - exp
         
-        # KPI Calculation
+        # 経営指標
         labor_cost = sum([r['総コスト'] for r in rows])
         labor_ratio = (labor_cost / rev * 100) if rev > 0 else 0
         profit_margin = (prof / rev * 100) if rev > 0 else 0
         
-        # KPI Cards
-        st.markdown("#### Management Indicators (KPI)")
+        st.markdown("#### 経営指標 (KPI)")
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("人件費率 (Labor Ratio)", f"{labor_ratio:.1f} %", help="目安: 60-70%")
-        k2.metric("営業利益率 (Margin)", f"{profit_margin:.1f} %", help="目安: 10%以上")
-        k3.metric("総売上 (Revenue)", f"{rev:,}")
-        k4.metric("営業利益 (Profit)", f"{prof:,}")
-
-        # Salary Editor
-        st.markdown("#### Salary Adjustments")
+        k1.metric("人件費率", f"{labor_ratio:.1f} %")
+        k2.metric("営業利益率", f"{profit_margin:.1f} %")
+        k3.metric("総売上", f"{rev:,}")
+        k4.metric("営業利益", f"{prof:,}")
+        
+        st.markdown("#### 給与・手当明細 (直接編集可)")
         with st.form("salary_edit"):
             row_df = pd.DataFrame(rows)
             edited_df = st.data_editor(
@@ -437,7 +464,7 @@ elif page == "PL_ANALYSIS":
                 use_container_width=True,
                 num_rows="fixed"
             )
-            if st.form_submit_button("Save & Recalculate"):
+            if st.form_submit_button("保存して再計算"):
                 for i, r in edited_df.iterrows():
                     name = r['氏名']
                     idx = smst[smst['氏名'] == name].index
@@ -446,10 +473,11 @@ elif page == "PL_ANALYSIS":
                         smst.at[idx[0], '調整額'] = r['調整額']
                 st.session_state.staff_master = smst
                 save_masters(smst, conf)
-                st.success("Updated."); time.sleep(0.5); st.rerun()
+                st.success("更新しました")
+                time.sleep(0.5); st.rerun()
 
-elif page == "BI_DASHBOARD":
-    st.subheader("AI Efficiency Analysis")
+elif page == "BIダッシュボード":
+    st.subheader("AI訪問効率分析")
     if not st.session_state.master_df.empty:
         std = 160
         df = st.session_state.master_df.copy()
@@ -457,9 +485,7 @@ elif page == "BI_DASHBOARD":
         tgt = df['Month'].max()
         df = df[df['Month'] == tgt]
         
-        # Get Staff Revenue
         _, _, _, staff_rev_map = run_pl_engine(df, st.session_state.staff_master, st.session_state.office_master)
-        
         agg = df.groupby(['氏名','職種']).agg(実働時間=('時間(分)','sum')).reset_index()
         mrg = pd.merge(st.session_state.staff_master, agg, on=['氏名','職種'], how='left').fillna(0)
         
@@ -467,7 +493,7 @@ elif page == "BI_DASHBOARD":
         
         def render_dept_bi(dept_code):
             d = mrg[mrg['Dept'] == dept_code].copy()
-            if d.empty: st.info("No Staff"); return
+            if d.empty: st.info("該当スタッフなし"); return
             
             rows = []
             for _, r in d.iterrows():
@@ -475,74 +501,75 @@ elif page == "BI_DASHBOARD":
                 fte = r['人員換算']
                 act_h = ceil_decimal(r['実働時間']/60, 1)
                 
-                # AI Analysis Metrics
+                # AI分析: 理論最大値に対する達成度
                 actual_rev = staff_rev_map.get(name, 0)
                 max_potential = fte * THEORETICAL_MAX_REV_PER_FTE
                 eff_score = (actual_rev / max_potential * 100) if max_potential > 0 else 0
                 
                 rows.append({
-                    "Name": name, "FTE": fte, "Act(H)": act_h, 
-                    "Rev(¥)": int(actual_rev), 
-                    "Efficiency(%)": ceil_decimal(eff_score, 1)
+                    "氏名": name, "人員換算(FTE)": fte, "実働(H)": act_h, 
+                    "売上貢献(円)": int(actual_rev), 
+                    "AI効率スコア(%)": ceil_decimal(eff_score, 1)
                 })
             
             bdf = pd.DataFrame(rows)
             c1, c2 = st.columns(2)
-            c1.metric("Dept Efficiency Score", f"{bdf['Efficiency(%)'].mean():.1f} %", help="Target: >85%")
-            c2.metric("Total Revenue", f"{bdf['Rev(¥)'].sum():,}")
+            c1.metric("部門平均スコア", f"{bdf['AI効率スコア(%)'].mean():.1f} %")
+            c2.metric("部門総売上", f"{bdf['売上貢献(円)'].sum():,}")
             
-            st.dataframe(bdf.style.background_gradient(subset=['Efficiency(%)'], cmap='Blues', vmin=50, vmax=100), use_container_width=True)
+            st.dataframe(bdf.style.background_gradient(subset=['AI効率スコア(%)'], cmap='Blues', vmin=50, vmax=100), use_container_width=True)
             
             ch = alt.Chart(bdf).mark_bar().encode(
-                x='Name', y='Efficiency(%)', color=alt.Color('Efficiency(%)', scale=alt.Scale(scheme='tealblues'))
+                x='氏名', y='AI効率スコア(%)', color=alt.Color('AI効率スコア(%)', scale=alt.Scale(scheme='tealblues'))
             ).properties(height=250)
             st.altair_chart(ch, use_container_width=True)
 
-        t1, t2 = st.tabs(["NURSE DEPT", "REHAB DEPT"])
+        t1, t2 = st.tabs(["看護部 (NURSE)", "リハビリ部 (REHAB)"])
         with t1: render_dept_bi('NURSE')
         with t2: render_dept_bi('REHAB')
 
-elif page == "SETTINGS":
-    st.subheader("Settings")
+elif page == "マスタ設定":
+    st.subheader("設定・マスタ管理")
     c = st.session_state.office_master
     p = c.setdefault('pl_params', {})
     
-    t1, t2 = st.tabs(["Office & Incentives", "Staff Master"])
+    t1, t2 = st.tabs(["事業所・インセンティブ", "スタッフマスタ"])
     with t1:
         with st.form("conf_form"):
-            st.markdown("##### Basic Info")
+            st.markdown("##### 基本情報")
             c1,c2 = st.columns(2)
-            ag = c1.selectbox("Area Grade", list(AREA_GRADES.keys()), index=list(AREA_GRADES.keys()).index(c['area_grade']))
-            ft = c2.selectbox("Facility Type", list(IRYO_MANAGE_FEES.keys()), index=list(IRYO_MANAGE_FEES.keys()).index(c['fac_type']))
+            ag = c1.selectbox("地域区分", list(AREA_GRADES.keys()), index=list(AREA_GRADES.keys()).index(c['area_grade']))
+            ft = c2.selectbox("機能強化型区分", list(IRYO_MANAGE_FEES.keys()), index=list(IRYO_MANAGE_FEES.keys()).index(c['fac_type']))
             
-            st.markdown("##### Fixed Costs")
+            st.markdown("##### 固定パラメータ")
             c3,c4,c5 = st.columns(3)
-            p_sga = c3.number_input("SGA (Selling, General & Admin)", value=p.get('sga_total', 0))
-            p_24 = c4.number_input("Medical 24H Count", value=p.get('iryo_24h_contract', 0))
-            p_tm = c5.number_input("Terminal Count", value=p.get('terminal_cases', 0))
+            p_sga = c3.number_input("販売管理費", value=p.get('sga_total', 0))
+            p_24 = c4.number_input("医療24H契約数", value=p.get('iryo_24h_contract', 0))
+            p_tm = c5.number_input("ターミナル件数", value=p.get('terminal_cases', 0))
             
-            st.markdown("##### Incentive Rules")
+            st.markdown("##### インセンティブ計算ルール")
+            st.caption("※対象職種、閾値(時間)、単価(円)を自由に追加できます")
             rules = st.data_editor(
                 c.get('incentive_rules', []),
                 num_rows="dynamic",
                 column_config={
-                    "target": st.column_config.SelectboxColumn("Target Job", options=["リハビリ職", "看護職", "全職種"], required=True),
-                    "threshold": st.column_config.NumberColumn("Threshold (H)", required=True),
-                    "price": st.column_config.NumberColumn("Unit Price (¥)", required=True)
+                    "target": st.column_config.SelectboxColumn("対象職種", options=["リハビリ職", "看護職", "全職種"], required=True),
+                    "threshold": st.column_config.NumberColumn("閾値時間 (～時間以上)", required=True),
+                    "price": st.column_config.NumberColumn("単価 (円)", required=True)
                 },
                 use_container_width=True
             )
             
-            if st.form_submit_button("Save Settings"):
+            if st.form_submit_button("設定を保存"):
                 c.update({'area_grade':ag, 'fac_type':ft, 'incentive_rules':rules})
                 c['pl_params'].update({'iryo_24h_contract':p_24, 'terminal_cases':p_tm, 'sga_total':p_sga})
                 save_masters(st.session_state.staff_master, c)
-                st.success("Saved")
+                st.success("保存しました")
 
     with t2:
         with st.form("st_form"):
             edited = st.data_editor(st.session_state.staff_master, num_rows="dynamic", use_container_width=True)
-            if st.form_submit_button("Save Staff"):
+            if st.form_submit_button("スタッフ情報を保存"):
                 st.session_state.staff_master = edited
                 save_masters(edited, c)
-                st.success("Saved")
+                st.success("保存しました")
