@@ -621,3 +621,4 @@ elif page == "マスタ設定":
                 st.session_state.staff_master = edited
                 save_masters(edited, c)
                 st.success("保存しました")
+
