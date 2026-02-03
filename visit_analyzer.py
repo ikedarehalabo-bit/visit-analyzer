@@ -96,6 +96,8 @@ def parse_single_dataframe(df_raw, source_name):
 
 # ページ設定
 st.set_page_config(page_title="VISIT ANALYZER Lite", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="VISIT ANALYZER Lite", layout="wide", page_icon="⚡")
+st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
 
 if 'first_load' not in st.session_state: st.session_state.first_load = True
 if 'current_page' not in st.session_state: st.session_state.current_page = "HOME"
@@ -207,4 +209,5 @@ else:
             else:
                 st.warning("スタッフを選択してください。")
         else:
+
             st.error("データがありません。「データ読み込み」を行ってください。")
