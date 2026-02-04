@@ -492,6 +492,8 @@ elif page == "収支・給与分析":
         labor_ratio = (labor_cost / rev * 100) if rev > 0 else 0
         profit_margin = (prof / rev * 100) if rev > 0 else 0
         
+        
+
         st.markdown("#### 経営指標 (KPI)")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("人件費率", f"{labor_ratio:.1f} %")
@@ -621,4 +623,3 @@ elif page == "マスタ設定":
                 st.session_state.staff_master = edited
                 save_masters(edited, c)
                 st.success("保存しました")
-
